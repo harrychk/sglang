@@ -292,8 +292,8 @@ class SetKAndS:
     def execute(cls, *args, buf, **kwargs):
         # Triton's fp8e4nv type is only supported on SM >= 90 (Hopper+).
         # On older GPUs, fall back to the vanilla (pure-PyTorch) path.
-        major, _ = torch.cuda.get_device_capability()
-        if major < 9:
+        cc = torch.cuda.get_device_capability()
+        if cc < (8, 9):
             cls.vanilla(*args, **kwargs, buf=buf)
             return
 

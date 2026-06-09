@@ -114,8 +114,8 @@ def act_quant(
 
     # Triton's fp8e4nv is only supported on SM >= 90. On older GPUs
     # (SM_86 Ampere etc), use a pure-PyTorch fallback instead.
-    major, _ = torch.cuda.get_device_capability()
-    if major < 9:
+    cc = torch.cuda.get_device_capability()
+    if cc < (8, 9):
         return _act_quant_torch(x, block_size)
 
     # Flatten all dims except last

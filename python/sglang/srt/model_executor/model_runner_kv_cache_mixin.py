@@ -52,8 +52,8 @@ class ModelRunnerKVCacheMixin:
     def get_cell_size_per_token(self: ModelRunner, num_layers: int) -> int:
         kv_size = torch._utils._element_size(self.kv_cache_dtype)
         if is_deepseek_compressed(self.model_config.hf_config):
-            major, _ = torch.cuda.get_device_capability()
-            use_bf16 = major < 9
+            cc = torch.cuda.get_device_capability()
+            use_bf16 = cc < (8, 9)
 
             if use_bf16:
                 cell_size = (

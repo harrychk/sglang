@@ -12,9 +12,8 @@ fp8_dtype = torch.float8_e4m3fnuz if is_fp8_fnuz() else torch.float8_e4m3fn
 
 
 def _is_sm_lt_90() -> bool:
-    """Return True if GPU SM version < 90 (no hardware FP8 support)."""
-    major, _ = torch.cuda.get_device_capability()
-    return major < 9
+    """Return True if GPU CC < (8, 9), i.e. Ampere and older without native FP8."""
+    return torch.cuda.get_device_capability() < (8, 9)
 
 
 def _is_sm_lt_100() -> bool:

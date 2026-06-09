@@ -611,8 +611,8 @@ class C4IndexerBackend:
             layer_id=c4_indexer.layer_id,
             compressor=c4_indexer.compressor,
         )
-        major, _ = torch.cuda.get_device_capability()
-        if major < 9:
+        cc = torch.cuda.get_device_capability()
+        if cc < (8, 9):
             c4_indexer_kv_cache = token_to_kv_pool.get_index_k_bf16_buffer(
                 layer_id=c4_indexer.layer_id,
             )
@@ -625,7 +625,7 @@ class C4IndexerBackend:
             if q_lora_ready is not None:
                 stream_q.wait_event(q_lora_ready)
             q = c4_indexer.compute_q(q_lora, positions=positions)
-            if major < 9:
+            if cc < (8, 9):
                 q_fp8 = q  # BF16 direct, kernel converts internally
                 q_scale = q.float().abs().amax(dim=-1) / 448.0
             else:
@@ -635,7 +635,7 @@ class C4IndexerBackend:
         with torch.cuda.stream(stream_weights):
             weights = c4_indexer.compute_weights(x, skip_scale=True)
             stream_weights.wait_event(q_scale_ready)
-            if major < 9:
+            if cc < (8, 9):
                 weights = weights * c4_indexer.weight_scale * q_scale
                 weights = weights.unsqueeze(-1)
             else:
@@ -659,8 +659,8 @@ class C4IndexerBackend:
             assert isinstance(self, CompressorBackend)
 
         q = c4_indexer.compute_q(q_lora, positions=positions)
-        major, _ = torch.cuda.get_device_capability()
-        if major < 9:
+        cc = torch.cuda.get_device_capability()
+        if cc < (8, 9):
             q_fp8 = q
             q_scale = q.float().abs().amax(dim=-1) / 448.0
             weights = c4_indexer.compute_weights(x, skip_scale=True)
@@ -676,7 +676,7 @@ class C4IndexerBackend:
             layer_id=c4_indexer.layer_id,
             compressor=c4_indexer.compressor,
         )
-        if major < 9:
+        if cc < (8, 9):
             c4_indexer_kv_cache = token_to_kv_pool.get_index_k_bf16_buffer(
                 layer_id=c4_indexer.layer_id,
             )
@@ -743,8 +743,8 @@ class C4IndexerBackend:
         assert len(q_fp8.shape) == 3
         q_fp8 = q_fp8.unsqueeze(1)
 
-        _major = torch.cuda.get_device_capability()[0] if torch.cuda.is_available() else 0
-        if _major < 9:
+        _cc = torch.cuda.get_device_capability() if torch.cuda.is_available() else (0, 0)
+        if _cc < (8, 9):
             # BF16 direct: cache is (num_pages, block_size, head_dim) bfloat16 — no view
             assert c4_indexer_kv_cache.shape[1:] == (64, 128)
         else:
@@ -774,7 +774,7 @@ class C4IndexerBackend:
             "SGLANG_OPT_USE_TILELANG_INDEXER" not in os.environ
             and "SGLANG_FP8_PAGED_MQA_LOGITS_TORCH" not in os.environ
             and not _has_dg_caps
-            and _major >= 9  # tilelang FP8 MMA requires SM>=89; SM_86 lacks it
+            and _cc >= (8, 9)  # tilelang FP8 MMA requires SM>=89; SM_86 lacks it
         )
 
         seq_lens_2d = True
@@ -786,7 +786,7 @@ class C4IndexerBackend:
         elif _force_torch:
             fn = fp8_paged_mqa_logits_torch
             seq_lens_2d = False
-        elif _major < 9:
+        elif _cc < (8, 9):
             # SM_86: KV cache already bfloat16 (no act_quant in compressor),
             # so the kernel reads BF16 directly — no dequant, no scales.
             fn = bf16_direct_paged_mqa_logits_tilelang

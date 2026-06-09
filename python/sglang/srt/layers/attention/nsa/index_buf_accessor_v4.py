@@ -151,8 +151,8 @@ class SetKAndS:
     def execute(cls, pool, buf, loc, nope_fp8_rope_bf16_pack: NopeFp8RopeBf16Pack):
         # Triton's fp8e4nv type is only supported on SM >= 90 (Hopper+).
         # SM_86 (Ampere) and older fall back to the Torch implementation.
-        major, _ = torch.cuda.get_device_capability()
-        if major < 9:
+        cc = torch.cuda.get_device_capability()
+        if cc < (8, 9):
             cls.torch(pool, buf, loc, nope_fp8_rope_bf16_pack)
         else:
             cls.triton(pool, buf, loc, nope_fp8_rope_bf16_pack)

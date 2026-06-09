@@ -49,8 +49,8 @@ class DSv4MemoryCalculator:
         assert c4_shrink_factor >= 1
         self.c4_shrink_factor = c4_shrink_factor
 
-        major, _ = torch.cuda.get_device_capability()
-        self.use_bf16 = major < 9
+        cc = torch.cuda.get_device_capability()
+        self.use_bf16 = cc < (8, 9)
 
         self.c4_ring_size = get_compress_state_ring_size(4, self.is_speculative)
         self.c128_ring_size = get_compress_state_ring_size(128, self.is_speculative)

@@ -141,15 +141,15 @@ class CompressorBackend:
             # Triton fp8e4nv only works on SM >= 90; use torch path on older GPUs
             import torch
 
-            major, _ = torch.cuda.get_device_capability()
+            cc = torch.cuda.get_device_capability()
             kv_bf16 = new_compressed_kv.bfloat16()
-            if major < 9:
+            if cc < (8, 9):
                 # SM_86: all-bf16 cache, no FP8 quant
                 pack_bf16 = quant_to_nope_bf16_rope_bf16_pack(kv_bf16)
                 token_to_kv_pool.set_extra_key_buffer(
                     layer_id, out_loc, cache_bf16_pack=pack_bf16,
                 )
-            elif major >= 9:
+            elif cc >= (8, 9):
                 pack = quant_to_nope_fp8_rope_bf16_pack_triton(kv_bf16)
                 token_to_kv_pool.set_extra_key_buffer(layer_id, out_loc, pack)
 
@@ -181,8 +181,8 @@ class CompressorBackend:
                 cache_k=new_compressed_kv,
             )
         else:
-            major, _ = torch.cuda.get_device_capability()
-            if major < 9:
+            cc = torch.cuda.get_device_capability()
+            if cc < (8, 9):
                 # SM_86: store BF16 directly, no FP8 quant / no scale
                 token_to_kv_pool.set_index_k_bf16(
                     layer_id=layer_id,
