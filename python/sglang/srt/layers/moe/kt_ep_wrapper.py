@@ -2569,7 +2569,7 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
                 chunked_prefill_size=self.kt_config.chunked_prefill_size,
                 method=self.kt_config.method,
                 max_deferred_experts_per_token=layer_max_deferred,
-
+                num_layers=self.kt_config.num_layers or 0,
             )
             if self.kt_expert_lora_enabled:
                 if _kt_swiglu_limit != 0.0:
