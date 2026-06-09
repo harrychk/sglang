@@ -492,10 +492,11 @@ class DeepSeekV4TokenToKVPool(KVCache):
 
         assert page_size % swa_page_size == 0
 
-        # SM_86 stores nope as bf16 instead of fp8, avoiding all FP8
-        # quantization/dequant issues.  Cache grows from 584→1024 B/token.
-        major, _ = torch.cuda.get_device_capability()
-        _bf16 = major < 9
+        # SM_80/SM_86/SM_87 (Ampere) lack native FP8 support — store nope
+        # as bf16 instead of fp8. SM_89+ (Ada Lovelace and later) have FP8
+        # and use the quantized path. Cache grows from 584→1024 B/token.
+        cc = torch.cuda.get_device_capability()
+        _bf16 = cc < (8, 9)
 
         self.swa_size = swa_size
         self.swa_window_size = swa_page_size

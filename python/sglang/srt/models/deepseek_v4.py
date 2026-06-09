@@ -1704,10 +1704,11 @@ class DeepseekV4ForCausalLM(nn.Module):
             else:
                 raise ValueError("num_nextn_predict_layers is not in the config")
 
-            # Dequantize MTP e_proj/h_proj FP8 weights to BF16.
-            # (e_proj/h_proj already use quant_config=None → BF16 params.)
-            # Attention FP8 weights are handled by Marlin FP8 — do NOT touch.
-            weights = _fix_mtp_fp8_weights(weights, nextn_layer_id)
+            # Dequantize MTP e_proj/h_proj FP8 weights to BF16 on GPUs
+            # that lack native FP8 support (Ampere SM_80/SM_86/SM_87).
+            # SM_89+ (Ada Lovelace+) handle FP8 natively via Marlin.
+            if torch.cuda.get_device_capability() < (8, 9):
+                weights = _fix_mtp_fp8_weights(weights, nextn_layer_id)
 
         if (
             envs.SGLANG_DSV4_MODE.get() == "2604"
