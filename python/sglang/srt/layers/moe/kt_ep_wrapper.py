@@ -2597,8 +2597,6 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
                 self.wrapper = KTMoEWrapper(
                     **common_wrapper_kwargs,
                     swiglu_limit=_kt_swiglu_limit,
-                    method=self.kt_config.method,
-                    max_deferred_experts_per_token=layer_max_deferred,
                 )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
