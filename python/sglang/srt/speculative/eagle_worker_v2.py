@@ -243,6 +243,17 @@ class EagleDraftWorker(BaseDraftWorker):
         self.draft_runner.draft_attn_backend = self.draft_attn_backend
         self.tree_mask_mode = TreeMaskMode.FULL_MASK
 
+    def _mtp_uses_cpu_experts(self) -> bool:
+        """Check if the MTP draft model is using CPU experts via KT EP wrapper."""
+        try:
+            decoder = self.draft_runner.model.model.decoder
+            if hasattr(decoder, 'mlp') and hasattr(decoder.mlp, 'experts'):
+                from sglang.srt.layers.moe.quant_method_registry import is_wrapped_method
+                return is_wrapped_method(decoder.mlp.experts.quant_method, "kt_ep")
+        except Exception:
+            pass
+        return False
+
     def init_cuda_graphs(self):
         """Capture cuda graphs."""
         self.cuda_graph_runner = None
@@ -326,8 +337,6 @@ class EagleDraftWorker(BaseDraftWorker):
                 not forward_batch.forward_mode.is_idle()
                 and self.speculative_num_steps > 1
             ):
-                # Skip attention backend init for 1-step draft,
-                # `draft_forward` only does sample in this case.
                 self.draft_attn_backend.init_forward_metadata(forward_batch)
             parent_list, top_scores_index, draft_tokens = self.draft_forward(
                 forward_batch
@@ -425,7 +434,6 @@ class EagleDraftWorker(BaseDraftWorker):
             # Set inputs
             forward_batch.input_ids = input_ids
             forward_batch.out_cache_loc = out_cache_loc[i]
-            forward_batch.positions.add_(1)
             forward_batch.attn_backend = self.draft_attn_backend.attn_backends[i]
             spec_info.hidden_states = hidden_states
 
@@ -440,6 +448,7 @@ class EagleDraftWorker(BaseDraftWorker):
             if self.hot_token_id is not None:
                 topk_index = self.hot_token_id[topk_index]
             hidden_states = logits_output.hidden_states
+            forward_batch.positions.add_(1)
 
         # Organize the results
         score_list = torch.cat(score_list, dim=1).flatten(

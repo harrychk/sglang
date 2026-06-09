@@ -72,18 +72,23 @@ class DeepseekV4ModelNextN(nn.Module):
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
+        # Use quant_config=None for MTP projection layers to force BF16
+        # parameters. The checkpoint stores these weights as FP8 E4M3,
+        # which are dequantized to BF16 during loading by
+        # _fix_mtp_fp8_weights.  FP8 parameters would fail on GPUs
+        # without native FP8 support.
         self.e_proj = ReplicatedLinear(
             config.hidden_size,
             config.hidden_size,
             bias=False,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=add_prefix("e_proj", prefix),
         )
         self.h_proj = ReplicatedLinear(
             config.hidden_size,
             config.hidden_size,
             bias=False,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=add_prefix("h_proj", prefix),
         )
 
@@ -233,13 +238,14 @@ class DeepseekV4ForCausalLMNextN(DeepseekV4ForCausalLM):
             hidden_states, pre_hc_head = result
         else:
             hidden_states = result
-        return self.logits_processor(
+        out = self.logits_processor(
             input_ids,
             hidden_states,
             self.lm_head,
             forward_batch,
             hidden_states_before_norm=pre_hc_head,
         )
+        return out
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         super().load_weights(weights, is_nextn=True)

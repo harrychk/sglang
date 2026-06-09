@@ -93,6 +93,19 @@ class EAGLEDraftExtendCudaGraphRunner:
         self.max_bs = max(self.capture_bs)
         self.max_num_token = self.max_bs * self.num_tokens_per_bs
 
+        # Register draft extend batch sizes with KTransformers CPU pinned buffer
+        # so that buffer addresses remain stable during CUDA graph replay.
+        # This is critical: num_tokens_per_bs = speculative_num_steps + 1,
+        # producing batch sizes (e.g. [3, 6, 12, 24, ...]) that are NOT in
+        # the main model's capture_bs, so they would otherwise be missed.
+        try:
+            from kt_kernel import KTMoEWrapper
+
+            num_tokens_bs = [bs * self.num_tokens_per_bs for bs in self.capture_bs]
+            KTMoEWrapper.set_capture_batch_sizes(num_tokens_bs)
+        except ImportError:
+            pass
+
         self.eagle_worker.draft_extend_attn_backend.init_cuda_graph_state(
             self.max_bs, self.max_num_token
         )

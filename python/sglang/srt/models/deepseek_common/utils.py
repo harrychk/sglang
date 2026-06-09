@@ -92,6 +92,12 @@ def awq_dequantize_func():
 def enable_nextn_moe_bf16_cast_to_fp8(
     quant_config: Optional[QuantizationConfig],
 ) -> bool:
+    # Guard: skip FP8 conversion on GPUs without native FP8 support (SM < 9.0).
+    # Consumer GPUs (RTX 30xx/40xx, SM 8.x) and older datacenter GPUs (A100, SM 8.0)
+    # lack hardware FP8 units and would crash on FP8-quantized NextN MoE weights.
+    if _is_cuda and _device_sm is not None and _device_sm < 90:
+        return False
+
     return (
         envs.SGLANG_NVFP4_CKPT_FP8_NEXTN_MOE.get()
         and quant_config is not None

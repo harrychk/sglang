@@ -328,17 +328,14 @@ def is_kt_ep_wrapper_disabled() -> bool:
 @contextmanager
 def speculative_kt_ep_disabled_context():
     """
-    Context manager to disable KT EP wrapper for draft model operations.
-    Ensures draft models use pure GPU MoE instead of CPU-GPU hybrid computation
-    via kt_ep_wrapper.
+    [DEPRECATED] This context manager formerly disabled the KT EP wrapper for
+    draft model operations in speculative decoding. It is now a no-op: MTP/NextN
+    layers can use the KT EP wrapper for CPU-GPU hybrid MoE computation.
+
+    The per-layer guard is now handled by create_kt_config_from_server_args()
+    which checks `is_nextn` on the FusedMoE layer instead of relying on a global flag.
     """
-    global DISABLE_KT_EP_WRAPPER
-    original_value = DISABLE_KT_EP_WRAPPER
-    try:
-        DISABLE_KT_EP_WRAPPER = True
-        yield
-    finally:
-        DISABLE_KT_EP_WRAPPER = original_value
+    yield
 
 
 # The type of method in top-K routing, for use in torch custom op
