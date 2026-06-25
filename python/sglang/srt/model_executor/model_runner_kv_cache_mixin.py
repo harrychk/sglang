@@ -384,7 +384,15 @@ class ModelRunnerKVCacheMixin:
         from sglang.srt.model_executor.memory_profiler import DSv4MemoryCalculator
 
         self.state_dtype = torch.float32
-        logger.info(f"DSv4 compressed attention: kv_cache_dtype={self.kv_cache_dtype}")
+        # On Ampere (SM_86), compressed attention stores BF16 regardless
+        # of kv_cache_dtype — the quant is skipped in compressor.py.
+        if torch.cuda.get_device_capability() < (8, 9):
+            _effective_kv_dtype = torch.bfloat16
+        else:
+            _effective_kv_dtype = self.kv_cache_dtype
+        logger.info(
+            f"DSv4 compressed attention: kv_cache_dtype={_effective_kv_dtype}"
+        )
         logger.info(f"DSv4 compressed attention: state_dtype={self.state_dtype}")
 
         page_size = self.server_args.page_size

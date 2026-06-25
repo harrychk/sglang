@@ -914,6 +914,11 @@ class MQALayer(nn.Module):
                 x, positions, forward_batch, attn_backend, freqs_cis, q_out
             )
 
+        _save_kv = (
+            False
+            if getattr(forward_batch, "mtp_skip_kv_cache_save", False)
+            else not self.overlap_store_cache
+        )
         o = attn_backend.forward(
             q=q_padded if q_padded is not None else q,
             k=kv,
@@ -922,7 +927,7 @@ class MQALayer(nn.Module):
             forward_batch=forward_batch,
             compress_ratio=self.compress_ratio,
             attn_sink=self.attn_sink,
-            save_kv_cache=not self.overlap_store_cache,
+            save_kv_cache=_save_kv,
         )
         o = o[:, tp_slice, :]
         fused_rope(
@@ -1172,11 +1177,21 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         hidden_states = self.input_layernorm(hidden_states)
 
+        # MTP draft attention should NOT write to shared KV cache.
+        # The draft decoder uses is_nextn=True; disabling KV cache writes
+        # prevents the draft attention from corrupting the target model's
+        # KV cache entries.
+        if self.is_nextn:
+            forward_batch.mtp_skip_kv_cache_save = True
+
         hidden_states = self.self_attn(
             x=hidden_states,
             positions=positions,
             forward_batch=forward_batch,
         )
+
+        if self.is_nextn:
+            forward_batch.mtp_skip_kv_cache_save = False
 
         hidden_states = self.hc_post(hidden_states, residual, post, comb)
         residual = hidden_states
@@ -1689,9 +1704,16 @@ class DeepseekV4ForCausalLM(nn.Module):
             else:
                 raise ValueError("num_nextn_predict_layers is not in the config")
 
+            # Dequantize MTP e_proj/h_proj FP8 weights to BF16 on GPUs
+            # that lack native FP8 support (Ampere SM_80/SM_86/SM_87).
+            # SM_89+ (Ada Lovelace+) handle FP8 natively via Marlin.
+            if torch.cuda.get_device_capability() < (8, 9):
+                weights = _fix_mtp_fp8_weights(weights, nextn_layer_id)
+
         if (
             envs.SGLANG_DSV4_MODE.get() == "2604"
             and not envs.SGLANG_OPT_FP8_WO_A_GEMM.get()
+            and not is_nextn  # MTP FP8 handled by _fix_mtp_fp8_weights above
         ):
             if envs.SGLANG_DSV4_FP4_EXPERTS.get():
                 weights = _dequant_fp8_wo_a(weights)
@@ -1978,6 +2000,11 @@ class DeepseekV4ForCausalLM(nn.Module):
         skipped_checking_patterns = ["attn_mqa.k_scale", "attn_mqa.v_scale"]
         if is_nextn:
             skipped_checking_patterns.extend(["lm_head", "embed_tokens"])
+            # FP8 weight_scale_inv params are dequantized+removed during
+            # _fix_mtp_fp8_weights on Ampere GPUs. On SM_89+ they are
+            # loaded natively as FP8 parameters, so only skip on Ampere.
+            if torch.cuda.get_device_capability() < (8, 9):
+                skipped_checking_patterns.append("weight_scale_inv")
         unloaded_params = {
             p
             for p in unloaded_params
@@ -2015,6 +2042,42 @@ class DeepseekV4ForCausalLM(nn.Module):
 
 
 EntryClass = [DeepseekV4ForCausalLM]
+
+
+def _fix_mtp_fp8_weights(weights, nextn_layer_id):
+    """Fix MTP FP8 weights and parameters for GPUs without FP8 support.
+
+    1. Dequantize FP8 E4M3 weights to BF16.
+    2. Patch FP8 model parameters to BF16 BEFORE loading.
+    """
+    # ---- 1. Dequantize FP8 weights to BF16 ----
+    # Only e_proj/h_proj need FP8→BF16 dequant.
+    # Attention FP8 weights are handled by Marlin FP8 kernels.
+    # Shared/routed expert weights are handled by the CPU INT4 path.
+    fp8_weight_suffixes = [
+        ".e_proj.weight", ".h_proj.weight",
+    ]
+    weights_dict = dict(weights)
+    for name in list(weights_dict.keys()):
+        w = weights_dict[name]
+        if w.dtype != torch.float8_e4m3fn:
+            continue
+        if not name.endswith(".weight"):
+            continue
+        if not any(name.endswith(suffix) for suffix in fp8_weight_suffixes):
+            continue
+        scale_name = name.replace(".weight", ".scale")
+        if scale_name not in weights_dict:
+            scale_name = name.replace(".weight", ".weight_scale_inv")
+            if scale_name not in weights_dict:
+                continue
+        s = weights_dict[scale_name]
+        if s.dtype != torch.float8_e8m0fnu:
+            continue
+        weights_dict[name] = _dequant_fp8(w, s)
+        # Drop the scale key — it is not needed after dequantization.
+        weights_dict.pop(scale_name, None)
+    return list(weights_dict.items())
 
 
 def _dequant_fp8(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:

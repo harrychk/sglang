@@ -1069,11 +1069,20 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                         self.model.__class__,
                     )
             else:
-                logger.warning(
-                    "Using FP8 KV cache but no scaling factors "
-                    "provided. Defaulting to scaling factors of 1.0. "
-                    "This may lead to less accurate results!"
-                )
+                cc = torch.cuda.get_device_capability()
+                if cc < (8, 9):
+                    logger.info(
+                        "KV cache dtype is fp8_e4m3 but GPU SM_%d%d lacks "
+                        "native FP8 support; compressed attention will use "
+                        "BF16 storage. No scaling factors needed.",
+                        cc[0], cc[1],
+                    )
+                else:
+                    logger.warning(
+                        "Using FP8 KV cache but no scaling factors "
+                        "provided. Defaulting to scaling factors of 1.0. "
+                        "This may lead to less accurate results!"
+                    )
 
         # Parse other args
         self.sliding_window_size = None

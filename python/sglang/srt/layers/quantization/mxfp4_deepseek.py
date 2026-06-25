@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -173,12 +174,25 @@ class DeepSeekMxfp4MoEMethod:
         self.moe_runner_config = moe_runner_config
 
         swiglu_limit = moe_runner_config.swiglu_limit
-        is_2604b = envs.SGLANG_DSV4_2604_SUBMODE.get() == "2604B"
-        assert is_2604b == (swiglu_limit is not None), (
-            f"swiglu_limit must be non-None iff submode=2604B "
-            f"(got submode={envs.SGLANG_DSV4_2604_SUBMODE.get()!r}, "
-            f"swiglu_limit={swiglu_limit!r})"
-        )
+        is_nextn = getattr(layer, "is_nextn", False)
+
+        if swiglu_limit is not None:
+            from sglang.srt.server_args import get_global_server_args
+            kt_method = (get_global_server_args().kt_method or "").upper()
+
+            if is_nextn:
+                # MTP GPU-only path: always use swiglu_limit (MXFP4 Triton
+                # Kernels need the clamp).  When MTP runs on CPU via KT
+                # EP wrapper, defer to the same logic as the main model.
+                if os.environ.get("SGLANG_KT_MTP_EXPERT_ON_CPU", "0") == "1":
+                    if kt_method != "MXFP4":
+                        swiglu_limit = None
+            else:
+                # Main-model layers: only apply SwiGLU clamp when kt_method
+                # is MXFP4.  For INT4 the KT EP wrapper handles it separately.
+                if kt_method != "MXFP4":
+                    swiglu_limit = None
+
         self._gemm1_clamp_limit_tensor = (
             torch.full(
                 (layer.num_local_experts,),
@@ -656,13 +670,21 @@ class DeepSeekMxfp4MoEMethod:
 
 def _mxfp4_predicate(layer, server_args):
     import os
+
+    # MTP draft layers always use MXFP4 weights and need the wrapper
+    # (Triton Kernels path on SM_86).  This bypasses both the runner
+    # backend check in get_quant_method() and the kt_method check below.
+    if getattr(layer, "is_nextn", False):
+        return True
+
+    # Main-model layers: only wrap when kt_method is MXFP4, or when
+    # explicitly forced via SGLANG_V4_USE_TRITON_KERNELS.
     env = os.environ.get("SGLANG_V4_USE_TRITON_KERNELS")
     if env == "1":
-        do_wrap = True
+        return True
     elif env == "0":
-        do_wrap = False
-    else:
-        do_wrap = (server_args.kt_method or "").upper() == "MXFP4"
+        return None
+    do_wrap = (server_args.kt_method or "").upper() == "MXFP4"
     if not do_wrap:
         return None
     return True  # ctx sentinel; factory reads layer attrs

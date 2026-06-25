@@ -499,6 +499,7 @@ class DeepseekV2MoE(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             layer_id=self.layer_id,
+            is_nextn=self.is_nextn,
             quant_config=quant_config,
             routed_scaling_factor=self.routed_scaling_factor,
             routing_method_type=getattr(

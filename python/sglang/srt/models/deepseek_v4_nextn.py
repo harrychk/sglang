@@ -72,18 +72,29 @@ class DeepseekV4ModelNextN(nn.Module):
         self.hc_head_base = nn.Parameter(torch.empty(hc_mult, dtype=torch.float32))
         self.hc_head_scale = nn.Parameter(torch.empty(1, dtype=torch.float32))
 
+        # Only use quant_config=None (BF16 params) for MTP projection layers
+        # on GPUs without native FP8 support (Ampere SM_80/SM_86/SM_87).
+        # On SM_89+ (Ada Lovelace+), keep the original quant_config so FP8
+        # weights are stored and computed natively without dequantization.
+        if torch.cuda.get_device_capability() < (8, 9):
+            _e_proj_quant_config = None
+            _h_proj_quant_config = None
+        else:
+            _e_proj_quant_config = quant_config
+            _h_proj_quant_config = quant_config
+
         self.e_proj = ReplicatedLinear(
             config.hidden_size,
             config.hidden_size,
             bias=False,
-            quant_config=quant_config,
+            quant_config=_e_proj_quant_config,
             prefix=add_prefix("e_proj", prefix),
         )
         self.h_proj = ReplicatedLinear(
             config.hidden_size,
             config.hidden_size,
             bias=False,
-            quant_config=quant_config,
+            quant_config=_h_proj_quant_config,
             prefix=add_prefix("h_proj", prefix),
         )
 
@@ -233,13 +244,14 @@ class DeepseekV4ForCausalLMNextN(DeepseekV4ForCausalLM):
             hidden_states, pre_hc_head = result
         else:
             hidden_states = result
-        return self.logits_processor(
+        out = self.logits_processor(
             input_ids,
             hidden_states,
             self.lm_head,
             forward_batch,
             hidden_states_before_norm=pre_hc_head,
         )
+        return out
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         super().load_weights(weights, is_nextn=True)

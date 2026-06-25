@@ -331,6 +331,10 @@ def speculative_kt_ep_disabled_context():
     Context manager to disable KT EP wrapper for draft model operations.
     Ensures draft models use pure GPU MoE instead of CPU-GPU hybrid computation
     via kt_ep_wrapper.
+
+    MTP/NextN layers in DeepSeek V4 are exempt from this guard — they are
+    controlled per-layer by create_kt_config_from_server_args() which checks
+    ``is_nextn`` and SGLANG_KT_MTP_EXPERT_ON_CPU instead of this global flag.
     """
     global DISABLE_KT_EP_WRAPPER
     original_value = DISABLE_KT_EP_WRAPPER

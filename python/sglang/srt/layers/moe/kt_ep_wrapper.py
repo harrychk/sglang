@@ -72,6 +72,24 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Dedicated file logger for MTP/KT-EP debug diagnostics.
+# Writes to /tmp/kt_mtp_debug.log so it is easy to find and tail.
+_kt_dbg_logger = None
+
+
+def _kt_dbg(msg: str, *args) -> None:
+    global _kt_dbg_logger
+    if _kt_dbg_logger is None:
+        _kt_dbg_logger = logging.getLogger("kt_mtp_debug")
+        _kt_dbg_logger.setLevel(logging.DEBUG)
+        _kt_dbg_logger.propagate = False
+        _fh = logging.FileHandler("/tmp/kt_mtp_debug.log", mode="a")
+        _fh.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+        ))
+        _kt_dbg_logger.addHandler(_fh)
+    _kt_dbg_logger.info(msg, *args)
+
 # Global cache for GPU experts masks (initialized once per session)
 _KT_GPU_EXPERTS_MASKS: Optional[torch.Tensor] = None
 
@@ -1958,41 +1976,100 @@ def _init_kt_gpu_experts_masks(server_args: "ServerArgs") -> Optional[torch.Tens
 
 
 def create_kt_config_from_server_args(
-    server_args: "ServerArgs", layer_idx: int
+    server_args: "ServerArgs", layer_idx: int, *, is_nextn: bool = False
 ) -> Optional[KTConfig]:
     """Create KTConfig from ServerArgs if KT is configured.
 
     Args:
         server_args: Global server arguments
         layer_idx: Layer index in the model
+        is_nextn: Whether this is a NextN (MTP) draft model layer (DeepSeek V4).
+                  When True, the layer gets a shifted layer_idx and an all-CPU
+                  mask so kt-kernel uses ``mtp.{M}`` key prefixes.
 
     Returns:
         KTConfig if KT is configured and not disabled, None otherwise
     """
-    # Check if KT EP wrapper is disabled (e.g., for draft models in speculative decoding)
-    from sglang.srt.layers.moe.utils import is_kt_ep_wrapper_disabled
-
-    if is_kt_ep_wrapper_disabled():
-        return None
-
     if server_args.kt_weight_path is None:
         return None
 
-    # Get GPU experts masks (initializes if needed)
+    # Get model config (unwrap VL configs that nest the text model config)
+    hf_config = server_args.get_hf_config()
+    if hasattr(hf_config, "text_config"):
+        hf_config = hf_config.text_config
+
+    # In draft context (speculative_kt_ep_disabled_context active),
+    # SGLANG_KT_MTP_EXPERT_ON_CPU controls whether draft layers use KT.
+    #   0 or unset → GPU-only for ALL draft layers (returns None)
+    #   1          → CPU+GPU for draft layers (proceed)
+    # This applies to both DeepSeek V4 MTP layers and other MoE models'
+    # EAGLE/standalone draft layers.
+    from sglang.srt.layers.moe.utils import is_kt_ep_wrapper_disabled
+
+    if is_kt_ep_wrapper_disabled():
+        if os.environ.get("SGLANG_KT_MTP_EXPERT_ON_CPU", "0") != "1":
+            if is_nextn:
+                logger.info(
+                    "MTP layer %d: GPU-only path (SGLANG_KT_MTP_EXPERT_ON_CPU=%s)",
+                    layer_idx,
+                    os.environ.get("SGLANG_KT_MTP_EXPERT_ON_CPU", "0"),
+                )
+            return None
+        if is_nextn:
+            logger.info(
+                "MTP layer %d: CPU+GPU path (SGLANG_KT_MTP_EXPERT_ON_CPU=1)",
+                layer_idx,
+            )
+
+    if is_nextn:
+        # DeepSeek V4 MTP layer: shift by num_hidden_layers so each draft
+        # layer gets a unique index (e.g. mtp.0 → 43, mtp.1 → 44, …).
+        # The kt-kernel weight loaders detect ``layer_idx >= num_layers`` and
+        # switch the key prefix from ``blk.{N}`` to ``mtp.{M}`` (zero-based
+        # MTP index).  All MTP experts are placed on CPU.
+        mtp_layer_idx = hf_config.num_hidden_layers + layer_idx
+
+        # Determine num_experts for MTP layer
+        num_experts = getattr(hf_config, "n_routed_experts", None)
+        if num_experts is None:
+            num_experts = getattr(hf_config, "num_local_experts", None)
+        if num_experts is None:
+            num_experts = getattr(hf_config, "num_experts", None)
+        if num_experts is None:
+            return None
+
+        gpu_experts_mask = torch.zeros(num_experts, dtype=torch.bool)
+        num_layers = hf_config.num_hidden_layers
+
+        _kt_dbg(
+            "MTP_CONFIG layer_idx=%d num_experts=%d num_gpu_experts=0 "
+            "weight_path=%s method=%s num_hidden_layers=%d",
+            mtp_layer_idx, num_experts, server_args.kt_weight_path,
+            server_args.kt_method, hf_config.num_hidden_layers,
+        )
+        return KTConfig(
+            layer_idx=mtp_layer_idx,
+            gpu_experts_mask=gpu_experts_mask,
+            cpuinfer_threads=server_args.kt_cpuinfer,
+            threadpool_count=server_args.kt_threadpool_count,
+            numa_nodes=server_args.kt_numa_nodes,
+            weight_path=server_args.kt_weight_path,
+            chunked_prefill_size=server_args.chunked_prefill_size,
+            method=server_args.kt_method,
+            max_deferred_experts_per_token=server_args.kt_max_deferred_experts_per_token,
+            num_layers=num_layers,
+            gpu_prefill_token_threshold=server_args.kt_gpu_prefill_token_threshold,
+            kt_enable_dynamic_expert_update=server_args.kt_enable_dynamic_expert_update,
+        )
+
+    # Non-MTP path: standard mask lookup.
+    # This covers both main-model layers and non-DeepSeek draft layers
+    # (when SGLANG_KT_MTP_EXPERT_ON_CPU=1 in draft context).
     masks = _init_kt_gpu_experts_masks(server_args)
     if masks is None:
         return None
 
-    # Get num_layers from model config (unwrap VL configs)
-    hf_config = server_args.get_hf_config()
-    if hasattr(hf_config, "text_config"):
-        hf_config = hf_config.text_config
     num_layers = getattr(hf_config, "num_hidden_layers", None)
-
-    # NOTE: hash-layer skip experiment was tried here (return None when
-    # layer_idx < num_hash_layers); it didn't help because the underlying
-    # fused_moe shape-mismatch in V4 hash MoE happens with or without KT wrap.
-    # Reverted; root cause is in V4 MoE weight layout vs sglang fused_moe.
 
     # Get mask for this specific layer
     gpu_experts_mask = masks[layer_idx]
@@ -2474,6 +2551,15 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
         # 2. Initialize KT wrapper for CPU experts
         # CPU experts are identified by gpu_experts_mask=False
         if self.tp_rank == 0:
+            _kt_dbg(
+                "CREATE_WRAPPER layer_idx=%d num_experts=%d "
+                "num_gpu_experts=%d hidden=%d intermediate=%d "
+                "num_experts_per_tok=%d threadpool=%d",
+                self.kt_config.layer_idx, self.global_num_experts,
+                self.num_gpu_experts, hidden_size,
+                intermediate_size_full, num_experts_per_tok,
+                self.kt_config.threadpool_count,
+            )
             # V4-Flash 2604B SwiGLU clamp on routed experts. The full
             # moe_runner_config (which carries swiglu_limit) does not arrive
             # until create_moe_runner(), but the value is fully determined
@@ -2498,6 +2584,9 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
                 numa_nodes=self.kt_config.numa_nodes,
                 weight_path=self.kt_config.weight_path,
                 chunked_prefill_size=self.kt_config.chunked_prefill_size,
+                method=self.kt_config.method,
+                max_deferred_experts_per_token=layer_max_deferred,
+                num_layers=self.kt_config.num_layers or 0,
             )
             if self.kt_expert_lora_enabled:
                 if _kt_swiglu_limit != 0.0:
@@ -2525,8 +2614,6 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
                 self.wrapper = KTMoEWrapper(
                     **common_wrapper_kwargs,
                     swiglu_limit=_kt_swiglu_limit,
-                    method=self.kt_config.method,
-                    max_deferred_experts_per_token=layer_max_deferred,
                 )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -2553,10 +2640,19 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
                 metadata is not None
                 and getattr(metadata, "physical_to_logical_map_cpu", None) is not None
             ):
-                physical_to_logical_map_cpu = (
-                    metadata.physical_to_logical_map_cpu[self.kt_config.layer_idx]
-                    .contiguous()
-                )
+                pmap = metadata.physical_to_logical_map_cpu
+                layer_idx = self.kt_config.layer_idx
+                # MTP/NextN layers use layer_idx == num_hidden_layers which is
+                # outside the main model's layer range. Fall back to identity
+                # mapping for these out-of-bounds layers.
+                if layer_idx < pmap.shape[0]:
+                    physical_to_logical_map_cpu = (
+                        pmap[layer_idx].contiguous()
+                    )
+                else:
+                    physical_to_logical_map_cpu = torch.arange(
+                        layer.num_experts, dtype=torch.int64, device="cpu"
+                    )
             else:
                 # Fallback for setups without EPLB metadata: identity mapping.
                 physical_to_logical_map_cpu = torch.arange(
@@ -2609,6 +2705,12 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
                     lora.rank,
                     lora.alpha,
                 )
+            _kt_dbg(
+                "LOAD_CPU_WEIGHTS layer_idx=%d num_experts=%d "
+                "phys2log_shape=%s",
+                self.kt_config.layer_idx, layer.num_experts,
+                tuple(physical_to_logical_map_cpu.shape),
+            )
 
     def create_moe_runner(
         self, layer: torch.nn.Module, moe_runner_config: "MoeRunnerConfig"
@@ -2789,6 +2891,22 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
 
         x = dispatch_output.hidden_states
         topk_output = dispatch_output.topk_output
+
+        # Runtime trace: first N calls for MTP layer (counter on class)
+        if not hasattr(KTEPWrapperMethod, "_apply_count"):
+            KTEPWrapperMethod._apply_count = {}
+        cnt = KTEPWrapperMethod._apply_count.get(self.kt_config.layer_idx, 0)
+        if cnt < 5:
+            KTEPWrapperMethod._apply_count[self.kt_config.layer_idx] = cnt + 1
+            _kt_dbg(
+                "APPLY#%d layer_idx=%d num_tokens=%d "
+                "hidden_shape=%s num_gpu_experts=%d "
+                "topk_ids_shape=%s has_wrapper=%s",
+                cnt, self.kt_config.layer_idx, int(x.shape[0]),
+                tuple(x.shape), self.num_gpu_experts,
+                tuple(topk_output.topk_ids.shape),
+                self.wrapper is not None,
+            )
         num_tokens = int(x.shape[0]) if x.dim() > 0 else 0
         _kt_timing = (
             os.environ.get("SGLANG_KT_HYBRID_TIMING") == "1"
@@ -2985,6 +3103,27 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
             if not _no_cpu_stream:
                 torch.cuda.current_stream(x.device).wait_event(self._sync_done_event)
             output = output + cpu_output
+
+            # Debug: check CPU output sanity (skip during CUDA graph capture
+            # because .item() forces GPU→CPU sync which breaks capture).
+            if not torch.cuda.is_current_stream_capturing():
+                _kt_dbg_cnt = getattr(KTEPWrapperMethod, "_out_stat_cnt", {})
+                _kt_dbg_n = _kt_dbg_cnt.get(self.kt_config.layer_idx, 0)
+                if _kt_dbg_n < 3:
+                    _kt_dbg_cnt[self.kt_config.layer_idx] = _kt_dbg_n + 1
+                    KTEPWrapperMethod._out_stat_cnt = _kt_dbg_cnt
+                    _kt_dbg(
+                        "OUTPUT_STAT#%d layer_idx=%d output_mean=%.6f output_std=%.6f "
+                        "cpu_output_mean=%.6f cpu_output_std=%.6f "
+                        "output_nonzero=%d/%d",
+                        _kt_dbg_n, self.kt_config.layer_idx,
+                        output.float().mean().item(),
+                        output.float().std().item(),
+                        cpu_output.float().mean().item(),
+                        cpu_output.float().std().item(),
+                        int(output.count_nonzero().item()),
+                        int(output.numel()),
+                    )
         if _kt_timing:
             _kt_t_after_merge = time.perf_counter()
             # Optional: synchronize GPU at end of apply() to capture true GPU
@@ -3171,7 +3310,8 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
 # ---------------------------------------------------------------------------
 
 def _kt_ep_predicate(layer, server_args):
-    return create_kt_config_from_server_args(server_args, layer.layer_id)
+    is_nextn = getattr(layer, 'is_nextn', False)
+    return create_kt_config_from_server_args(server_args, layer.layer_id, is_nextn=is_nextn)
 
 
 def _kt_ep_factory(layer, gpu_method, kt_config):

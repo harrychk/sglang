@@ -190,12 +190,14 @@ class FusedMoE(torch.nn.Module):
         with_bias=False,
         routing_method_type: Optional[RoutingMethodType] = None,
         is_gated: bool = True,
+        is_nextn: bool = False,
     ):
         super().__init__()
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
 
         self.layer_id = layer_id
+        self.is_nextn = is_nextn
         self.top_k = top_k
         self.hidden_size = hidden_size
         self.num_experts = num_experts
