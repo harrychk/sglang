@@ -62,6 +62,8 @@ if TYPE_CHECKING:
     )
     from sglang.srt.server_args import ServerArgs
 
+import inspect
+
 try:
     from kt_kernel import KTMoEWrapper, generate_gpu_experts_masks
 
@@ -69,6 +71,19 @@ try:
 except ImportError:
     KTRANSFORMERS_AVAILABLE = False
 
+# Detect whether the installed kt_kernel supports optional parameters
+# added on the ktransformers deepseek-v4-ampere branch (num_layers,
+# swiglu_alpha).  These are absent from ktransformers main, so we must
+# avoid passing them to KTMoEWrapper when running against main.
+_KT_WRAPPER_HAS_NUM_LAYERS = False
+_KT_WRAPPER_HAS_SWIGLU_ALPHA = False
+if KTRANSFORMERS_AVAILABLE:
+    try:
+        _KT_NEW_SIG = inspect.signature(KTMoEWrapper.__new__)
+        _KT_WRAPPER_HAS_NUM_LAYERS = "num_layers" in _KT_NEW_SIG.parameters
+        _KT_WRAPPER_HAS_SWIGLU_ALPHA = "swiglu_alpha" in _KT_NEW_SIG.parameters
+    except Exception:
+        pass
 
 logger = logging.getLogger(__name__)
 
@@ -2016,6 +2031,13 @@ def create_kt_config_from_server_args(
                 )
             return None
         if is_nextn:
+            if not _KT_WRAPPER_HAS_NUM_LAYERS:
+                logger.info(
+                    "MTP layer %d: GPU-only path "
+                    "(KTMoEWrapper does not support num_layers)",
+                    layer_idx,
+                )
+                return None
             logger.info(
                 "MTP layer %d: CPU+GPU path (SGLANG_KT_MTP_EXPERT_ON_CPU=1)",
                 layer_idx,
@@ -2586,8 +2608,11 @@ class KTEPWrapperMethod(FusedMoEMethodBase):
                 chunked_prefill_size=self.kt_config.chunked_prefill_size,
                 method=self.kt_config.method,
                 max_deferred_experts_per_token=layer_max_deferred,
-                num_layers=self.kt_config.num_layers or 0,
             )
+            if _KT_WRAPPER_HAS_NUM_LAYERS:
+                common_wrapper_kwargs["num_layers"] = (
+                    self.kt_config.num_layers or 0
+                )
             if self.kt_expert_lora_enabled:
                 if _kt_swiglu_limit != 0.0:
                     raise ValueError(
